@@ -264,6 +264,7 @@ __all__ = [
     "linear_feature_kernel",
     "pairwise_distances",
     "separation_measures",
+    "stratified_subsample_indices",
 ]
 
 
@@ -736,7 +737,97 @@ def linear_feature_kernel(F: Any) -> torch.Tensor:
     return _gram(_features(F))
 
 
-def separation_measures(F: Any, y: Any) -> SeparationMeasures:
+def stratified_subsample_indices(
+    y: Any,
+    max_rows: int | None = None,
+    *,
+    seed: int = 0,
+) -> np.ndarray:
+    """
+    Deterministic, class-stratified subsample indices of length at most ``max_rows``.
+
+    Preserves class proportions as closely as possible via proportional quota
+    allocation with largest-remainder rounding. When ``max_rows`` is at least
+    the number of classes present, every class with at least one sample is
+    guaranteed representation (any class with zero allocated rows after proportional
+    distribution receives one row transferred from the class with the largest allocation).
+    The selected indices are returned in sorted order, keeping features and labels
+    aligned.
+
+    Parameters
+    ----------
+    y:
+        Labels of shape ``(n_samples,)``, array-like or tensor.
+    max_rows:
+        Maximum number of samples to select. If ``None`` or greater than or equal to
+        the total number of samples, all sample indices ``np.arange(n_samples)``
+        are returned. Must be ``>= 1`` if specified.
+    seed:
+        Seed for the pseudorandom generator. Default is 0.
+
+    Returns
+    -------
+    numpy.ndarray
+        Sorted 1D array of selected integer indices, shape ``(n_samples,)`` if
+        ``max_rows is None`` or ``max_rows >= n_samples``, else ``(max_rows,)``.
+
+    Raises
+    ------
+    ValueError
+        If ``max_rows is not None`` and ``max_rows < 1``.
+    """
+    if max_rows is not None and max_rows < 1:
+        raise ValueError(f"max_rows must be >= 1 or None; got {max_rows}.")
+
+    labels = np.asarray(y if not isinstance(y, torch.Tensor) else y.detach().cpu().numpy())
+    labels = labels.reshape(-1)
+    n_total = labels.shape[0]
+    if max_rows is None or max_rows >= n_total:
+        return np.arange(n_total, dtype=np.intp)
+
+    classes, counts = np.unique(labels, return_counts=True)
+    n_classes = len(classes)
+    rng = np.random.default_rng(seed)
+
+    if max_rows < n_classes:
+        order = np.argsort(-counts)
+        chosen_classes = order[:max_rows]
+        selected = [
+            rng.choice(np.where(labels == classes[c])[0], size=1, replace=False)[0]
+            for c in chosen_classes
+        ]
+        return np.sort(np.array(selected, dtype=np.intp))
+
+    quotas = max_rows * counts / n_total
+    alloc = np.floor(quotas).astype(int)
+    rem = max_rows - int(alloc.sum())
+    if rem > 0:
+        remainders = quotas - alloc
+        order = np.argsort(-remainders, kind="stable")
+        alloc[order[:rem]] += 1
+
+    zero_classes = np.where(alloc == 0)[0]
+    for c in zero_classes:
+        donor = int(np.argmax(alloc))
+        alloc[donor] -= 1
+        alloc[c] = 1
+
+    selected_parts = []
+    for c in range(n_classes):
+        idx_c = np.where(labels == classes[c])[0]
+        chosen = rng.choice(idx_c, size=alloc[c], replace=False)
+        selected_parts.append(chosen)
+
+    return np.sort(np.concatenate(selected_parts).astype(np.intp))
+
+
+def separation_measures(
+    F: Any,
+    y: Any,
+    *,
+    max_rows: int | None = None,
+    seed: int = 0,
+) -> SeparationMeasures:
     """
     Every scalar separation measure of a feature matrix, in one record.
 
@@ -750,6 +841,14 @@ def separation_measures(F: Any, y: Any) -> SeparationMeasures:
     ----------
     F, y:
         As for :func:`pairwise_distances`; at least 3 samples.
+    max_rows:
+        Optional maximum number of samples; must be at least 3 if specified. If the
+        input exceeds this limit, a deterministic, class-stratified subsample of
+        size ``max_rows`` is drawn using ``seed`` before forming quadratic-size
+        matrices. If ``None`` (default), all samples are used.
+    seed:
+        Random seed for the stratified subsample draw when ``max_rows`` is used.
+        Default is 0.
 
     Returns
     -------
@@ -759,7 +858,8 @@ def separation_measures(F: Any, y: Any) -> SeparationMeasures:
     Raises
     ------
     TypeError, ValueError
-        As :func:`fisher_discriminant_ratio`.
+        As :func:`fisher_discriminant_ratio`; or if ``max_rows`` is not ``None``
+        and less than 3.
 
     Notes
     -----
@@ -767,6 +867,11 @@ def separation_measures(F: Any, y: Any) -> SeparationMeasures:
     subtracted from every row).  Centring removes a common offset, so this
     is the centred alignment of ``F Fᵀ``, computed without the cancellation
     described in :func:`linear_feature_kernel`.
+
+    When ``max_rows`` is given and fewer rows are evaluated than the full
+    input matrix, the resulting numbers are stratified Monte Carlo estimates
+    of the population separation measures on that subsample size, and
+    ``n_samples`` reports the number of rows actually used.
 
     Examples
     --------
@@ -779,9 +884,16 @@ def separation_measures(F: Any, y: Any) -> SeparationMeasures:
     >>> round(measures.kernel_alignment, 12)  # 8² / (20 · 4)
     0.8
     """
+    if max_rows is not None and max_rows < 3:
+        raise ValueError(f"max_rows must be >= 3 or None; got {max_rows}.")
     features = _features(F)
     n_samples, n_features = features.shape
     positive = _classes(y, n_samples)
+    if max_rows is not None and n_samples > max_rows:
+        indices = stratified_subsample_indices(positive, max_rows, seed=seed)
+        features = features[indices]
+        positive = positive[indices]
+        n_samples = features.shape[0]
     fisher = _fisher(features, positive)  # first: it refuses fewer than 3 samples
     distances = _distances(features, positive)
     alignment = kernel_target_alignment(_gram(features - features[0]), positive.to(torch.float64))

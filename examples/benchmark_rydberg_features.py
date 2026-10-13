@@ -118,8 +118,9 @@ their product.  The default γ list starts with ``γ = 0``, the noiseless map.
   and the count is not used.
 * **Arms C and D have no grid.**  They are run once per fold, with ``null``
   in the grid fields.  Arm B does not depend on ``V/Ω`` (its Hamiltonian has
-  no interaction term); it is still evaluated at every grid point, with that
-  point's register, so every A line has its B line.
+  no interaction term): its non-interacting features are computed once per
+  dephasing rate and fold and reused across the interaction grid, so every
+  A line has its B line.
 
 Units: ħ = 1, angular frequencies (Ω, γ, ``C6/r⁶``) in rad/µs, lengths in
 µm, times in µs; inputs and features are dimensionless.
@@ -157,7 +158,7 @@ tuning trial, a repeated run) reads the file; a change in either part of the
 key is a miss.  The inputs are fitted per fold (step 2), so each fold has
 its own entries: "once" is once per grid point and input matrix.  The
 recorded ``feature_seconds`` is the simulation time measured when the
-features were computed, also on a cache hit.
+features were computed, also on a cache hit; on a reused arm B line it is 0.
 
 Tuning
 ------
@@ -192,19 +193,30 @@ What a line records
 ``arm``, ``head``, ``representation``, ``feature_map_trained``; the grid
 point (``v_over_omega``, ``gamma_over_omega``, ``spacing_um``, ``omega``,
 ``omega_t``, ``evolution_time_us``, ``n_steps``) and the map's
-``get_config()`` (``feature_map``); ``measurement`` and ``shots``; the fold
-(``fold``, ``n_splits``, ``train_idx``, ``val_idx``, ``test_idx`` as sorted
-row indices into the dataset, ``n_synthetic``); every seed (``seeds``);
-``feature_dim``, ``n_parameters`` (trainable) and ``n_frozen_parameters``;
-the model's class and config; the chosen ``hyperparameters`` and the
-``tuning`` candidates with their scores; ``mcc``, ``pr_auc``, ``threshold``
-and ``epochs``; ``feature_seconds`` (simulating the features of the fold's
-rows), ``train_seconds`` (the final fit) and ``tuning_seconds``;
+``get_config()`` (``feature_map``); ``reused_from_v_over_omega`` (identifying
+the interaction-grid value from which an arm B record was reused across the
+grid, or ``null`` if the record was computed rather than reused; for reused
+records, ``feature_seconds``, ``train_seconds``, and ``tuning_seconds`` are
+all zero); ``measurement`` and ``shots``; the fold (``fold``, ``n_splits``,
+``train_idx``, ``val_idx``, ``test_idx`` as sorted row indices into the
+dataset, ``n_synthetic``); every seed (``seeds``); ``feature_dim``,
+``n_parameters`` (trainable) and ``n_frozen_parameters``; the model's class
+and config; the chosen ``hyperparameters`` and the ``tuning`` candidates
+with their scores; ``mcc``, ``pr_auc``, ``threshold`` and ``epochs``;
+``feature_seconds`` (the actual computation time simulating the fold's
+features, or 0.0 for reused records), ``train_seconds`` (the final fit) and
+``tuning_seconds``;
 ``separation``, the measures of
 :func:`hqnn_forge.diagnostics.separation_measures` on the matrix the head
 receives, for the real rows of the training part (``train``) and for the
-test rows (``test``); the dataset's size and SHA-256; ``settings`` and
-``environment``.
+test rows (``test``).  On a training or test partition exceeding
+``--max-separation-rows`` (default 2000), the measures are computed on a
+class-stratified subsample drawn with ``--separation-seed`` (default 0)
+to bound memory.  Train and test partitions are subsampled independently
+with the same seed, so on a large dataset the two parts can rest on
+different bases (e.g. train subsampled, test in full).
+``separation[part]['n_samples']`` records the actual number of rows used;
+the dataset's size and SHA-256; ``settings`` and ``environment``.
 
 **The file is strict JSON.**  A NaN is written as ``null`` (as
 :mod:`hqnn_forge.experiment` does) and an infinity as the string ``"inf"``
@@ -222,7 +234,8 @@ Usage
         --dataset positive-control iranian-churn --data-path data/raw --download
 
 ``--quick`` runs one fold of one small grid point on a small positive
-control, for a smoke test.
+control, for a smoke test; ``--max-separation-rows`` and
+``--separation-seed`` still apply.
 """
 
 from __future__ import annotations
@@ -342,6 +355,12 @@ class Settings:
         Samples of the positive control.
     random_state:
         Root seed of every split, draw, initialisation and batch order.
+    max_separation_rows:
+        Maximum rows used to compute separation measures (pairwise distances
+        and linear kernel), or ``None`` to use all rows. Default 2000.
+    separation_seed:
+        Seed for the class-stratified subsample draw when eligible rows
+        exceed ``max_separation_rows``. Default 0.
     """
 
     n_atoms: int = 4
@@ -370,6 +389,8 @@ class Settings:
     )
     n_samples: int = 600
     random_state: int = 0
+    max_separation_rows: int | None = 2000
+    separation_seed: int = 0
 
     def __post_init__(self) -> None:
         # The limit of the Rydberg maps and arm D's depth bind only where those arms run.
@@ -411,6 +432,10 @@ class Settings:
         empty = sorted(k for k, values in self.search_space.items() if len(values) == 0)
         if empty:
             raise ValueError(f"no values to draw from for {empty}.")
+        if self.max_separation_rows is not None and self.max_separation_rows < 3:
+            raise ValueError(
+                f"max_separation_rows must be >= 3 or None; got {self.max_separation_rows}."
+            )
 
     @property
     def evolution_time(self) -> float:
@@ -1433,18 +1458,43 @@ def run_dataset(
             },
         }
 
+        arm_b_cache: dict[float, list[dict[str, Any]]] = {}
         for rep in reps:
+            if (
+                rep.arm == "B"
+                and rep.gamma_over_omega is not None
+                and rep.gamma_over_omega in arm_b_cache
+            ):
+                for cached_record in arm_b_cache[rep.gamma_over_omega]:
+                    yield {
+                        **cached_record,
+                        **_grid_fields(rep, settings),
+                        "feature_map": rep.config,
+                        "reused_from_v_over_omega": cached_record["v_over_omega"],
+                        "feature_seconds": 0.0,
+                        "train_seconds": 0.0,
+                        "tuning_seconds": 0.0,
+                    }
+                continue
+
             cached = features_of(rep, split, cache)
             matrix = cached.features
             separation = {
                 "train": separation_measures(
-                    matrix[split.real], split.labels[split.real]
+                    matrix[split.real],
+                    split.labels[split.real],
+                    max_rows=settings.max_separation_rows,
+                    seed=settings.separation_seed,
                 ).to_dict(),
                 "test": separation_measures(
-                    matrix[split.test], split.labels[split.test]
+                    matrix[split.test],
+                    split.labels[split.test],
+                    max_rows=settings.max_separation_rows,
+                    seed=settings.separation_seed,
                 ).to_dict(),
             }
             tuning_features = [features_of(rep, s, cache).features for s in tuning_splits]
+            arm_b_records: list[dict[str, Any]] = []
             for head in rep.heads:
                 chosen: dict[str, Any] = {}
                 tuning: dict[str, Any] | None = None
@@ -1477,7 +1527,7 @@ def run_dataset(
                     batch_seed=seeds["batch_seed"],
                 )
                 sampled = settings.shots is not None and rep.arm in ("A", "B", "D")
-                yield {
+                record = {
                     **data_info,
                     "arm": rep.arm,
                     "head": head,
@@ -1485,6 +1535,7 @@ def run_dataset(
                     "feature_map_trained": head == "hybrid",
                     **_grid_fields(rep, settings),
                     "feature_map": rep.config,
+                    "reused_from_v_over_omega": None,
                     "measurement": "shots" if sampled else "exact",
                     "shots": settings.shots if sampled else None,
                     **fold_info,
@@ -1506,6 +1557,11 @@ def run_dataset(
                     "settings": settings.as_dict(),
                     "environment": env,
                 }
+                yield record
+                if rep.arm == "B":
+                    arm_b_records.append(record)
+            if rep.arm == "B" and rep.gamma_over_omega is not None:
+                arm_b_cache[rep.gamma_over_omega] = arm_b_records
 
 
 def summarise(records: Sequence[Mapping[str, Any]]) -> str:
@@ -1621,6 +1677,18 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--patience", type=int, default=default.patience)
     parser.add_argument("--samples", type=int, default=default.n_samples)
     parser.add_argument("--seed", type=int, default=default.random_state)
+    parser.add_argument(
+        "--max-separation-rows",
+        type=int,
+        default=default.max_separation_rows,
+        help="maximum rows for separation measures (<= 0 for full data; floor 3)",
+    )
+    parser.add_argument(
+        "--separation-seed",
+        type=int,
+        default=default.separation_seed,
+        help="seed for separation measure subsampling",
+    )
     return parser
 
 
@@ -1629,12 +1697,23 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     Parse the command line, run, print the summary and return the records.
 
     ``--quick`` replaces the grid, the budget and the dataset by those of
-    :data:`QUICK`; only ``--out``, the cache options and ``--seed`` still
-    apply.
+    :data:`QUICK`; only ``--out``, the cache options, ``--seed``, and
+    separation subsampling flags (``--max-separation-rows``,
+    ``--separation-seed``) still apply.
     """
     args = _parser().parse_args(argv)
+    max_sep = (
+        None
+        if args.max_separation_rows is not None and args.max_separation_rows <= 0
+        else args.max_separation_rows
+    )
     if args.quick:
-        settings = dataclasses.replace(QUICK, random_state=args.seed)
+        settings = dataclasses.replace(
+            QUICK,
+            random_state=args.seed,
+            max_separation_rows=max_sep,
+            separation_seed=args.separation_seed,
+        )
         names = ["positive-control"]
     else:
         settings = Settings(
@@ -1658,6 +1737,8 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
             inner_folds=args.inner_folds,
             n_samples=args.samples,
             random_state=args.seed,
+            max_separation_rows=max_sep,
+            separation_seed=args.separation_seed,
         )
         names = list(dict.fromkeys(args.dataset))
     datasets = {

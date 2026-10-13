@@ -355,6 +355,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   measures, seeds, fold indices, environment). Arm B is a classical model, so `A − B` measures
   what interaction-induced mixing of inputs adds, not "quantum" against "classical";
   `--quick` is a smoke test (#501, #517)
+- `separation_measures` gains `max_rows` and `seed` keywords to bound memory via deterministic
+  stratified subsampling, exported as `stratified_subsample_indices` from
+  `hqnn_forge.diagnostics`; `examples/benchmark_rydberg_features.py` exposes them through
+  `--max-separation-rows` and `--separation-seed`, and computes non-interacting arm B once per
+  dephasing rate and fold (#519, #520)
 
 ### Changed
 - The package metadata links the repository, issue tracker and changelog, and the README's

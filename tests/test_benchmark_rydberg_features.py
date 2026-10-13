@@ -1452,6 +1452,7 @@ FIELDS = {
     "evolution_time_us",
     "n_steps",
     "feature_map",
+    "reused_from_v_over_omega",
     "measurement",
     "shots",
     "fold",
@@ -1770,3 +1771,388 @@ class TestShotsRun:
         assert read[0]["separation"]["test"] == pytest.approx(expected, rel=1e-9)
         exact = _map_by_hand(4, 1.0, 0.1, 40).transform(fold.inputs[fold.test_idx]).numpy()
         assert np.abs(test - exact).max() > 0.01  # sampled, not exact
+
+
+# ---------------------------------------------------------------------------
+# Arm B reuse across interaction-grid values and separation-measure subsampling
+# ---------------------------------------------------------------------------
+
+
+class TestArmBReuse:
+    def test_arm_b_computed_once_per_gamma_and_fold(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Regression test for #519: Arm B feature map has no interactions, so its
+        features, tuning, training and separation measures do not depend on V/Ω.
+        Arm B should be computed once per (gamma, fold) and reused across all
+        interaction-grid points.
+        """
+        settings = _replace(
+            QUICK,
+            arms=("A", "B"),
+            n_atoms=2,
+            n_trials=0,
+            n_splits=2,
+            max_folds=2,
+            n_steps=10,
+            v_over_omega=(0.5, 1.0, 2.0),
+            gamma_over_omega=(0.0, 0.1),
+        )
+        rng = np.random.RandomState(42)
+        X = rng.randn(40, 2)
+        y = np.array([0, 1] * 20)
+        data = {"positive-control": (X, y, 0)}
+
+        calls: list[str] = []
+        orig_features_of = bench.features_of
+
+        def spy_features_of(rep: Any, split: Any, cache: Any) -> Any:
+            calls.append(rep.arm)
+            return orig_features_of(rep, split, cache)
+
+        monkeypatch.setattr(bench, "features_of", spy_features_of)
+
+        out = tmp_path / "reuse.jsonl"
+        records = bench.run(data, settings, out, cache_dir=tmp_path / "cache")
+        read = bench.read_records(out)
+        assert len(records) == len(read)
+
+        # 2 folds, 3 V values, 2 gamma values:
+        # Arm A must run for every V and gamma: 2 folds * 2 gammas * 3 V = 12 times.
+        # Arm B must run only once per (gamma, fold): 2 folds * 2 gammas = 4 times.
+        assert calls.count("A") == 12
+        assert calls.count("B") == 4
+
+        # Verify output records:
+        # Each fold has 2 gammas * 3 V values * 2 arms * 2 heads = 24 records per fold -> 48 records total
+        assert len(records) == 2 * 2 * 3 * 2 * 2
+
+        # Arm A records differ across V values (at least for training / separation)
+        a_records = [
+            r
+            for r in records
+            if r["arm"] == "A"
+            and r["head"] == "linear"
+            and r["fold"] == 0
+            and r["gamma_over_omega"] == 0.1
+        ]
+        assert len(a_records) == 3
+        assert [r["v_over_omega"] for r in a_records] == [0.5, 1.0, 2.0]
+
+        # Arm B records are yielded for every V value to preserve schema and A/B pairing
+        for gamma in (0.0, 0.1):
+            b_records = [
+                r
+                for r in records
+                if r["arm"] == "B"
+                and r["head"] == "linear"
+                and r["fold"] == 0
+                and r["gamma_over_omega"] == gamma
+            ]
+            assert len(b_records) == 3
+            assert [r["v_over_omega"] for r in b_records] == [0.5, 1.0, 2.0]
+
+            # Each record retains the register of its own grid point
+            reg0 = b_records[0]["feature_map"]["config"]["register"]
+            reg1 = b_records[1]["feature_map"]["config"]["register"]
+            reg2 = b_records[2]["feature_map"]["config"]["register"]
+            assert reg0 != reg1 and reg1 != reg2
+            assert b_records[0]["spacing_um"] != b_records[1]["spacing_um"]
+
+            # First line is original; subsequent lines are marked as reused with zero timings
+            assert b_records[0]["reused_from_v_over_omega"] is None
+            assert b_records[1]["reused_from_v_over_omega"] == 0.5
+            assert b_records[2]["reused_from_v_over_omega"] == 0.5
+            assert b_records[1]["feature_seconds"] == 0.0
+            assert b_records[1]["train_seconds"] == 0.0
+            assert b_records[1]["tuning_seconds"] == 0.0
+            assert b_records[2]["feature_seconds"] == 0.0
+            assert b_records[2]["train_seconds"] == 0.0
+            assert b_records[2]["tuning_seconds"] == 0.0
+
+            # But Arm B results are mathematically identical across all V values for this gamma
+            for k in ("mcc", "pr_auc", "threshold", "separation", "hyperparameters"):
+                assert b_records[0][k] == b_records[1][k] == b_records[2][k]
+
+        # Verify Arm B is not incorrectly reused across different dephasing rates
+        b_g0 = [
+            r
+            for r in records
+            if r["arm"] == "B"
+            and r["head"] == "linear"
+            and r["fold"] == 0
+            and r["gamma_over_omega"] == 0.0
+        ]
+        b_g1 = [
+            r
+            for r in records
+            if r["arm"] == "B"
+            and r["head"] == "linear"
+            and r["fold"] == 0
+            and r["gamma_over_omega"] == 0.1
+        ]
+        assert b_g0[0]["separation"] != b_g1[0]["separation"]
+
+    def test_arm_b_features_independent_of_spacing(self) -> None:
+        """Non-interacting features (Arm B) do not depend on atom spacing or V/Omega."""
+        settings = _replace(QUICK, n_atoms=3)
+        map1 = bench.feature_map(
+            settings, v_over_omega=0.5, gamma_over_omega=0.1, interactions=False
+        )
+        map2 = bench.feature_map(
+            settings, v_over_omega=2.0, gamma_over_omega=0.1, interactions=False
+        )
+        assert map1.register != map2.register
+
+        X = torch.tensor([[-1.0, 0.0, 1.0], [0.5, -0.5, 0.2]], dtype=torch.float64)
+        F1 = map1.transform(X)
+        F2 = map2.transform(X)
+        torch.testing.assert_close(F1, F2, atol=1e-12, rtol=1e-12)
+
+        # Also verify exact noiseless evolution (gamma=0)
+        map_nl1 = bench.feature_map(
+            settings, v_over_omega=0.5, gamma_over_omega=0.0, interactions=False
+        )
+        map_nl2 = bench.feature_map(
+            settings, v_over_omega=2.0, gamma_over_omega=0.0, interactions=False
+        )
+        assert map_nl1.register != map_nl2.register
+        F_nl1 = map_nl1.transform(X)
+        F_nl2 = map_nl2.transform(X)
+        torch.testing.assert_close(F_nl1, F_nl2, atol=1e-12, rtol=1e-12)
+
+    def test_increasing_v_grid_does_not_increase_arm_b_computation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Arm B computation count depends only on gamma and folds, not the number of V grid points."""
+        rng = np.random.RandomState(42)
+        X = rng.randn(40, 2)
+        y = np.array([0, 1] * 20)
+        data = {"positive-control": (X, y, 0)}
+
+        b_calls = 0
+        orig_features_of = bench.features_of
+
+        def spy_features_of(rep: Any, split: Any, cache: Any) -> Any:
+            nonlocal b_calls
+            if rep.arm == "B":
+                b_calls += 1
+            return orig_features_of(rep, split, cache)
+
+        monkeypatch.setattr(bench, "features_of", spy_features_of)
+
+        # 1 V value
+        s1 = _replace(
+            QUICK,
+            arms=("B",),
+            n_atoms=2,
+            n_trials=0,
+            n_splits=2,
+            max_folds=2,
+            n_steps=10,
+            v_over_omega=(1.0,),
+            gamma_over_omega=(0.1,),
+        )
+        bench.run(data, s1, tmp_path / "run1.jsonl", cache_dir=tmp_path / "cache1")
+        assert b_calls == 2  # 2 folds
+
+        # 4 V values
+        b_calls = 0
+        s4 = _replace(
+            QUICK,
+            arms=("B",),
+            n_atoms=2,
+            n_trials=0,
+            n_splits=2,
+            max_folds=2,
+            n_steps=10,
+            v_over_omega=(0.2, 0.5, 1.0, 2.0),
+            gamma_over_omega=(0.1,),
+        )
+        bench.run(data, s4, tmp_path / "run4.jsonl", cache_dir=tmp_path / "cache4")
+        assert b_calls == 2  # Still 2 folds, despite 4x V values!
+
+    def test_arm_b_reused_results_match_single_grid_results(self, tmp_path: Path) -> None:
+        """Reusing Arm B gives identical metrics and separation measures as running it alone."""
+        rng = np.random.RandomState(42)
+        X = rng.randn(40, 2)
+        y = np.array([0, 1] * 20)
+        data = {"positive-control": (X, y, 0)}
+
+        s_single = _replace(
+            QUICK,
+            arms=("B",),
+            n_atoms=2,
+            n_trials=0,
+            n_splits=2,
+            n_steps=10,
+            v_over_omega=(2.0,),
+            gamma_over_omega=(0.1,),
+        )
+        r_single = bench.run(data, s_single, tmp_path / "s.jsonl", cache_dir=tmp_path / "cs")
+
+        s_multi = _replace(
+            QUICK,
+            arms=("B",),
+            n_atoms=2,
+            n_trials=0,
+            n_splits=2,
+            n_steps=10,
+            v_over_omega=(0.5, 1.0, 2.0),
+            gamma_over_omega=(0.1,),
+        )
+        r_multi = bench.run(data, s_multi, tmp_path / "m.jsonl", cache_dir=tmp_path / "cm")
+
+        # For V=2.0 in multi-grid, Arm B was reused from V=0.5 and matches single-grid run exactly
+        matching = [r for r in r_multi if r["v_over_omega"] == 2.0]
+        assert len(matching) == len(r_single)
+        for r1, r2 in zip(r_single, matching, strict=True):
+            assert r2["reused_from_v_over_omega"] == 0.5
+            assert r2["feature_seconds"] == 0.0
+            assert r2["train_seconds"] == 0.0
+            assert r2["tuning_seconds"] == 0.0
+            assert r1["mcc"] == r2["mcc"]
+            assert r1["pr_auc"] == pytest.approx(r2["pr_auc"])
+            assert r1["threshold"] == pytest.approx(r2["threshold"])
+            assert r1["separation"] == r2["separation"]
+            assert r1["hyperparameters"] == r2["hyperparameters"]
+
+
+class TestSeparationSubsamplingIntegration:
+    def test_parser_options(self) -> None:
+        parser = bench._parser()
+        args = parser.parse_args(["--max-separation-rows", "500", "--separation-seed", "42"])
+        assert args.max_separation_rows == 500
+        assert args.separation_seed == 42
+
+        # Disable subsampling via 0
+        args_zero = parser.parse_args(["--max-separation-rows", "0"])
+        assert args_zero.max_separation_rows == 0
+
+    def test_settings_validates_max_separation_rows(self) -> None:
+        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got 2"):
+            bench.Settings(max_separation_rows=2)
+        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got 0"):
+            bench.Settings(max_separation_rows=0)
+        with pytest.raises(ValueError, match=r"max_separation_rows must be >= 3 or None; got -10"):
+            bench.Settings(max_separation_rows=-10)
+
+    def test_quick_respects_separation_flags(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured_settings: list[Any] = []
+
+        def spy_run_dataset(
+            name: str, X: Any, y: Any, settings: Any, *args: Any, **kwargs: Any
+        ) -> Any:
+            captured_settings.append(settings)
+            return []
+
+        monkeypatch.setattr(bench, "run_dataset", spy_run_dataset)
+        bench.main(
+            [
+                "--quick",
+                "--max-separation-rows",
+                "50",
+                "--separation-seed",
+                "12",
+                "--out",
+                str(tmp_path / "o1.jsonl"),
+            ]
+        )
+        assert len(captured_settings) == 1
+        assert captured_settings[0].max_separation_rows == 50
+        assert captured_settings[0].separation_seed == 12
+
+        captured_settings.clear()
+        bench.main(["--quick", "--max-separation-rows", "0", "--out", str(tmp_path / "o2.jsonl")])
+        assert len(captured_settings) == 1
+        assert captured_settings[0].max_separation_rows is None
+
+    def test_bounded_separation_records_and_training_unaffected(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """
+        Verify that max_separation_rows bounds separation calculation rows,
+        records the metadata in settings, and leaves model training using the full dataset.
+        """
+        rng = np.random.RandomState(42)
+        X = rng.randn(100, 2)
+        y = np.array([0, 1] * 50)
+        data = {"positive-control": (X, y, 0)}
+
+        # Capture model training inputs to verify full dataset was used
+        train_row_counts: list[int] = []
+        orig_train_model = bench.train_model
+
+        def spy_train_model(
+            model: Any,
+            loss_fn: Any,
+            optimizer: Any,
+            x_train: torch.Tensor,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            train_row_counts.append(x_train.shape[0])
+            return orig_train_model(model, loss_fn, optimizer, x_train, *args, **kwargs)
+
+        monkeypatch.setattr(bench, "train_model", spy_train_model)
+
+        settings = _replace(
+            QUICK,
+            arms=("C",),
+            n_atoms=2,
+            n_trials=0,
+            n_splits=2,
+            max_separation_rows=20,
+            separation_seed=7,
+        )
+        records = bench.run(data, settings, tmp_path / "sub.jsonl", cache_dir=tmp_path / "csub")
+
+        # In fold 0: 100 samples total, split into 50 train_part, 50 test.
+        # With 4 validation folds, inner_train has ~37-38 rows.
+        # Model training was NOT subsampled to 20 rows!
+        assert len(train_row_counts) > 0
+        assert all(count >= 35 for count in train_row_counts)
+
+        # Separation measures for train must be bounded by max_separation_rows = 20
+        for r in records:
+            assert r["settings"]["max_separation_rows"] == 20
+            assert r["settings"]["separation_seed"] == 7
+            assert r["separation"]["train"]["n_samples"] == 20
+            # Test partition has 50 samples, which also exceeds 20
+            assert r["separation"]["test"]["n_samples"] == 20
+
+    def test_seed_changes_separation_samples(self, tmp_path: Path) -> None:
+        rng = np.random.RandomState(42)
+        X = rng.randn(80, 2)
+        y = np.array([0, 1] * 40)
+        data = {"positive-control": (X, y, 0)}
+
+        s1 = _replace(
+            QUICK,
+            arms=("C",),
+            n_atoms=2,
+            n_trials=0,
+            n_splits=2,
+            max_separation_rows=25,
+            separation_seed=1,
+        )
+        r1 = bench.run(data, s1, tmp_path / "r1.jsonl", cache_dir=tmp_path / "c1")
+
+        s2 = _replace(
+            QUICK,
+            arms=("C",),
+            n_atoms=2,
+            n_trials=0,
+            n_splits=2,
+            max_separation_rows=25,
+            separation_seed=2,
+        )
+        r2 = bench.run(data, s2, tmp_path / "r2.jsonl", cache_dir=tmp_path / "c2")
+
+        # Different separation seeds produce different separation results on the subsample
+        sep1 = r1[0]["separation"]["train"]["mean_within_distance"]
+        sep2 = r2[0]["separation"]["train"]["mean_within_distance"]
+        assert sep1 != sep2
