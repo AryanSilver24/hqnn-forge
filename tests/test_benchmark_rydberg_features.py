@@ -21,6 +21,7 @@ What the numbers are checked against:
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -839,6 +840,22 @@ class TestCommandLine:
         parser = bench._parser()
         assert parser.description is None
         assert parser.parse_args(["--quick"]).quick is True
+
+    def test_every_parser_option_has_help(self) -> None:
+        """Every optional argument of _parser() must carry a non-empty help string (#526).
+
+        ``ArgumentDefaultsHelpFormatter`` only prints a default next to an option
+        that already has a ``help=`` string; without one, both the description and
+        the default are invisible to users running ``--help``.
+        """
+        parser = bench._parser()
+        missing = [
+            action.option_strings
+            for action in parser._actions
+            if action.option_strings  # skip the positional catch-all action
+            and action.help in (None, argparse.SUPPRESS, "")
+        ]
+        assert missing == [], f"Options without a help string: {missing}"
 
 
 # ---------------------------------------------------------------------------
