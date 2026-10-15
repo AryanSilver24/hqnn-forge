@@ -498,6 +498,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dataset-selection, and training options (#563)
 
 ### Fixed
+- Pin PyPI diagram links to their release README, replace tilde-fenced Mermaid blocks and blocks
+  with whitespace before `mermaid`, and use GitHub-compatible anchors for whitespace, inline links,
+  closing `#` sequences and repeated headings (#534)
 - Building a classifier or encoding layer on a built-in simulator (`default.qubit` or a
   lightning device), with or without `init_seed`, no longer advances NumPy's global RNG, and
   neither do train-mode density noise, `encoded_states`, `quantum_kernel_matrix`,
