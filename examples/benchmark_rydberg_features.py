@@ -233,9 +233,11 @@ Usage
     python examples/benchmark_rydberg_features.py \\
         --dataset positive-control iranian-churn --data-path data/raw --download
 
-``--quick`` runs one fold of one small grid point on a small positive
-control, for a smoke test; ``--max-separation-rows`` and
-``--separation-seed`` still apply.
+``--quick`` runs the predefined QUICK smoke-test configuration (one fold,
+one small grid point) on the positive control, explicitly selecting
+``positive-control`` and ignoring conflicting grid, model, dataset-selection,
+and training options; only ``--out``, ``--cache-dir``, ``--no-cache``,
+``--seed``, ``--max-separation-rows``, and ``--separation-seed`` still apply.
 """
 
 from __future__ import annotations
@@ -1652,7 +1654,16 @@ def _parser() -> argparse.ArgumentParser:
         default=Path("rydberg_features_benchmark.jsonl"),
         help="JSON-lines output file; replaced once the first record is written",
     )
-    parser.add_argument("--quick", action="store_true", help="one fold, one small grid point")
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help=(
+            "smoke test: run QUICK (one fold, one small grid point) on the positive control, "
+            "ignoring conflicting grid, model, dataset-selection, and training options; "
+            "only --out, --cache-dir, --no-cache, --seed, --max-separation-rows, "
+            "and --separation-seed still apply"
+        ),
+    )
     parser.add_argument(
         "--dataset",
         nargs="+",
@@ -1815,10 +1826,12 @@ def main(argv: Sequence[str] | None = None) -> list[dict[str, Any]]:
     """
     Parse the command line, run, print the summary and return the records.
 
-    ``--quick`` replaces the grid, the budget and the dataset by those of
-    :data:`QUICK`; only ``--out``, the cache options, ``--seed``, and
-    separation subsampling flags (``--max-separation-rows``,
-    ``--separation-seed``) still apply.
+    ``--quick`` runs the predefined :data:`QUICK` smoke-test configuration
+    (one fold, one small grid point) and explicitly selects the
+    ``positive-control`` dataset, ignoring conflicting grid, model,
+    dataset-selection, and training options; only ``--out``, ``--cache-dir``,
+    ``--no-cache``, ``--seed``, ``--max-separation-rows``, and
+    ``--separation-seed`` still apply.
     """
     args = _parser().parse_args(argv)
     max_sep = (
