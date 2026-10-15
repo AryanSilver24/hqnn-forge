@@ -287,7 +287,12 @@ def validate_noise(
 def _noisy_qnode(
     qnode: qml.QNode, n_qubits: int, p: float, position: Position, channel: Channel
 ) -> qml.QNode:
-    device = qml.device("default.mixed", wires=n_qubits)
+    # Explicit seed=None: PennyLane's default ("global") draws a seed from
+    # np.random, which would advance the caller's NumPy RNG on every build
+    # (#417).  The channel is simulated exactly, so the seed draws nothing:
+    # density noise with shots is refused when the layer is built
+    # (TrainingNoiseMixin._init_training_noise); revisit this if that ever changes.
+    device = qml.device("default.mixed", wires=n_qubits, seed=None)
     base = qml.QNode(qnode.func, device, diff_method="backprop", interface="torch")
     return qml.noise.insert(base, CHANNELS[channel].op, p, position=position)
 
