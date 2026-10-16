@@ -293,9 +293,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `noise_sweep(..., channel="readout")`, and `readout_error=` on the layers and classifiers for
   training (weight-safe in checkpoints). The map acts on the layer's output: a layer's own
   `readout_error` is suppressed inside `apply_depolarizing_noise` like its other training
-  noise, and `apply_readout_error` refuses a layer without `TrainingNoiseMixin`. On a sampled
-  layer the mean is exact but the shot noise is scaled by `|1 − p01 − p10|`, smaller than that
-  of flipped shots (#486). A model trained with `readout_error` learns its offset, and
+  noise, and `apply_readout_error` refuses a layer without `TrainingNoiseMixin`. A model
+  trained with `readout_error` learns its offset, and
   `predict_proba` runs without it unless called inside `apply_readout_error` (#488) (#358)
 - A model specification page, `docs/rydberg-model.md`, for a simulated Rydberg-atom feature
   map: units, Hamiltonian and its sign and ordering conventions, chain geometry, the detuning
@@ -506,6 +505,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dataset-selection, and training options (#563)
 
 ### Fixed
+- A readout error `(p01, p10)` on a sampled layer (`shots=`, or inside `apply_shots`) flips
+  each shot, drawn from the device's seeded generator, instead of rescaling the estimate: the
+  output now has the shot noise `(1 − ⟨Z'⟩²)/shots` of a device with that error, where its
+  spread was scaled by `|1 − p01 − p10|`, too small for every ⟨Z⟩ and zero at
+  `p01 + p10 = 1`. Gradients are unchanged in expectation, but a seeded layer's sampled
+  gradients take other values, as the flips now draw from the device's generator before the
+  backward pass; exact layers are unaffected (#486, #546)
 - Pin PyPI diagram links to their release README, replace tilde-fenced Mermaid blocks and blocks
   with whitespace before `mermaid`, and use GitHub-compatible anchors for whitespace, inline links,
   closing `#` sequences and repeated headings (#534)
