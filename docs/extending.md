@@ -223,11 +223,10 @@ other places to update:
 - **Weight shape.** `variational_weight_shape(entangler, n_qubits, n_layers)`, next to
   `apply_variational_layers`, is the one definition of the `weights` shape: every encoder
   registers its `weights` from it, and `extra_repr` counts `n_params` from the layer's
-  parameters. The `Rot` blocks take `(n_layers, n_qubits, 3)` and `"hardware_efficient"`
-  takes `(n_layers, n_qubits)`; a block with another shape adds a branch there and nowhere
-  else. Within the shape, dim 0 must stay
-  the layer index, which is what `block_local_init_` and the diagnostics' `n_layers` fallback
-  read.
+  parameters. The `Rot` blocks take `(n_layers, n_qubits, 3)` and `"hardware_efficient"` takes
+  `(n_layers, n_qubits)`; every block has its own branch there, which mypy checks (step 3), and
+  its shape is defined nowhere else. Within the shape, dim 0 must stay the layer index, which is
+  what `block_local_init_` and the diagnostics' `n_layers` fallback read.
 - **`layer_offset`.** `DataReuploadingLayer` applies the blocks one at a time, with an embedding
   in between. A block whose gates depend on the layer index (as the strongly-entangling ranges
   do) must use `layer_offset + ℓ`, so that one-at-a-time and all-at-once give the same circuit.
