@@ -521,6 +521,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `examples/benchmark_rydberg_features.py`: clarify that `--quick` runs the predefined `QUICK`
   smoke-test configuration on the positive control and ignores conflicting grid, model,
   dataset-selection, and training options (#563)
+- `kernel_target_alignment` accepts array-like labels such as a NumPy array or pandas Series
+  (#539)
 
 ### Fixed
 - `examples/benchmark_rydberg_features.py` treats a feature cache entry it cannot read (empty, truncated, missing a field, or removed while being read) as a miss: it warns, recomputes the features and replaces the entry, instead of stopping the run (#621, #631)
