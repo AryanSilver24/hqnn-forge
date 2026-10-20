@@ -205,6 +205,13 @@ bytes removed, and exits without running the benchmark; files it cannot read as
 an entry (such as ``*.part`` files or entries from before #543) are listed and
 left untouched (#575).
 
+A power loss shortly after ``os.replace`` can still leave the final ``.npz`` entry empty or
+partially written.  On the next request, ``fetch`` treats an unreadable entry as a cache
+miss, warns, and recomputes the features, replacing the damaged entry.  This costs
+recomputation but does not return a false cache hit.  Calling ``fsync`` on every
+temporary file and the cache directory would add overhead to every write to guard
+against this rare failure, so the cache does not do so.
+
 What the key does not see: the platform string (as ``compare_environment``),
 the packages ``environment()`` does not record, such as a dependency of
 PennyLane or the BLAS behind NumPy, and a change of a recorded package that
@@ -331,13 +338,17 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import errno
 import hashlib
 import itertools
 import json
 import math
+import numbers
 import os
+import stat
 import tempfile
 import time
+import warnings
 import zipfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -394,8 +405,35 @@ DATASETS: tuple[str, ...] = (
 )
 #: Losses by name.  ``bce`` makes the linear head on the inputs a logistic regression.
 LOSSES: dict[str, Callable[[], nn.Module]] = {"bce": nn.BCEWithLogitsLoss, "focal": FocalLoss}
+
+
+def _positive_integer(value: Any) -> bool:
+    return isinstance(value, numbers.Integral) and not isinstance(value, bool) and not value < 1
+
+
+def _positive_real(value: Any) -> bool:
+    return (
+        isinstance(value, numbers.Real)
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and not value <= 0
+    )
+
+
+#: Validation predicate and shared bound wording for each tunable training setting.
+TRAINING_SETTING_RULES: dict[str, tuple[Callable[[Any], bool], str]] = {
+    "lr": (_positive_real, "finite and > 0"),
+    "max_epochs": (_positive_integer, ">= 1"),
+    "batch_size": (_positive_integer, ">= 1"),
+    "patience": (
+        lambda value: value is None or _positive_integer(value),
+        ">= 1 or None",
+    ),
+}
+
 #: Training settings the shared search space may vary, as in ``hqnn_forge.benchmark``.
-TUNABLE: frozenset[str] = frozenset({"lr", "batch_size", "max_epochs", "patience"})
+TUNABLE: frozenset[str] = frozenset(TRAINING_SETTING_RULES)
+
 #: Rows a frozen circuit evaluates at a time.
 _CIRCUIT_CHUNK = 1024
 #: Axis of arm D's embedding rotation; the layer does not keep it, so its config reads it here.
@@ -523,15 +561,12 @@ class Settings:
             raise ValueError(f"hidden must be >= 1; got {self.hidden}.")
         if "D" in self.arms and self.circuit_layers < 1:
             raise ValueError(f"circuit_layers must be >= 1; got {self.circuit_layers}.")
-        if self.max_epochs < 1:
-            raise ValueError(f"max_epochs must be >= 1; got {self.max_epochs}.")
-        if self.patience is not None and self.patience < 1:
-            raise ValueError(f"patience must be None or >= 1; got {self.patience}.")
         # Also where tuning overrides them: a refused default should not depend on --trials.
-        if self.batch_size < 1:
-            raise ValueError(f"batch_size must be >= 1; got {self.batch_size}.")
-        if not 0 < self.lr < math.inf:  # NaN too
-            raise ValueError(f"lr must be finite and > 0; got {self.lr}.")
+        defaults = self.defaults
+        for key, (predicate, bound) in TRAINING_SETTING_RULES.items():
+            value = defaults[key]
+            if not predicate(value):
+                raise ValueError(f"{key} must be {bound}; got {value!r}.")
         if not self.v_over_omega or min(self.v_over_omega) <= 0:
             raise ValueError(f"v_over_omega needs values > 0; got {self.v_over_omega}.")
         if not self.gamma_over_omega or min(self.gamma_over_omega) < 0:
@@ -555,24 +590,14 @@ class Settings:
         empty = sorted(k for k, values in self.search_space.items() if len(values) == 0)
         if empty:
             raise ValueError(f"no values to draw from for {empty}.")
-        batch_sizes = self.search_space.get("batch_size", ())
-        if any(value < 1 for value in batch_sizes):
-            raise ValueError(
-                f"search_space['batch_size'] must hold values >= 1; got {list(batch_sizes)}."
-            )
-        rates = self.search_space.get("lr", ())
-        if any(not 0 < value < math.inf for value in rates):
-            raise ValueError(f"search_space['lr'] must hold finite values > 0; got {list(rates)}.")
-        epochs = self.search_space.get("max_epochs", ())
-        if any(value is None or value < 1 for value in epochs):
-            raise ValueError(
-                f"search_space['max_epochs'] must hold values >= 1; got {list(epochs)}."
-            )
-        patiences = self.search_space.get("patience", ())
-        if any(value is not None and value < 1 for value in patiences):
-            raise ValueError(
-                f"search_space['patience'] must hold values >= 1 or None; got {list(patiences)}."
-            )
+
+        for key, values in self.search_space.items():
+            predicate, bound = TRAINING_SETTING_RULES[key]
+            if not all(predicate(value) for value in values):
+                raise ValueError(
+                    f"search_space['{key}'] values must be {bound}; got {list(values)!r}."
+                )
+
         if self.max_separation_rows is not None and self.max_separation_rows < 3:
             raise ValueError(
                 f"max_separation_rows must be >= 3 or None; got {self.max_separation_rows}."
@@ -1402,6 +1427,23 @@ class PruneReport(NamedTuple):
     unreadable: tuple[Path, ...]
 
 
+_ENTRY_ERRORS = (
+    OSError,
+    EOFError,
+    ValueError,
+    KeyError,
+    TypeError,
+    zipfile.BadZipFile,
+)
+
+
+def _stored_environment(stored: Mapping[str, Any]) -> dict[str, Any]:
+    environment = json.loads(str(stored["environment"]))
+    if not isinstance(environment, dict):
+        raise TypeError("the stored environment is not a JSON object")
+    return environment
+
+
 class FeatureCache:
     """
     Features on disk, one ``.npz`` file per input matrix, feature-map
@@ -1492,14 +1534,24 @@ class FeatureCache:
         ``compute(inputs)``, timed and stored with this cache's environment.
         """
         path = self.path(inputs, labels, config)
-        if path is not None and path.exists():
-            with np.load(path, allow_pickle=False) as stored:
-                return CachedFeatures(
-                    np.asarray(stored["features"], dtype=np.float64),
-                    float(stored["seconds"]),
-                    True,
-                    json.loads(str(stored["environment"])),
+        if path is not None:
+            try:
+                with np.load(path, allow_pickle=False) as stored:
+                    return CachedFeatures(
+                        np.asarray(stored["features"], dtype=np.float64),
+                        float(stored["seconds"]),
+                        True,
+                        _stored_environment(stored),
+                    )
+            except FileNotFoundError:
+                pass
+            except _ENTRY_ERRORS as error:
+                warnings.warn(
+                    f"feature cache entry {path} is unreadable ({error!r}); recomputing",
+                    RuntimeWarning,
+                    stacklevel=2,
                 )
+
         start = time.perf_counter()
         features = np.ascontiguousarray(compute(inputs), dtype=np.float64)
         seconds = time.perf_counter() - start
@@ -1557,16 +1609,10 @@ class FeatureCache:
                     if entry_code != self.code_sha256:
                         is_stale = True
                     else:
-                        if "environment" not in stored:
-                            unreadable.append(path)
-                            continue
-                        raw_env = json.loads(str(stored["environment"]))
-                        if not isinstance(raw_env, dict):
-                            unreadable.append(path)
-                            continue
+                        raw_env = _stored_environment(stored)
                         entry_key_env = key_environment(raw_env)
                         is_stale = entry_key_env != current_key_env
-            except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile, EOFError):
+            except _ENTRY_ERRORS:
                 unreadable.append(path)
                 continue
 
@@ -2251,11 +2297,18 @@ def check_writable(out: str | os.PathLike[str]) -> None:
     """
     Refuse an ``out`` that cannot be written, and change nothing.
 
-    An existing file is opened for appending and closed without a write, so
-    its content stays as it is; for a new one a temporary file is created in
-    its directory and removed.  Either raises what writing ``out`` would,
-    here, as a ``ValueError`` naming ``out``: a missing directory, a
-    directory in its place, no write permission.
+    An existing regular file is opened for appending and closed without a
+    write, so its content stays as it is.  FIFOs and character or block
+    devices are checked with ``os.access`` without opening them, using effective
+    IDs where supported: opening a FIFO would interfere with its reader.
+    Other existing targets are probed by opening them for appending too.
+    For a new file a temporary file is created in its directory and removed,
+    keeping the output basename in the probe's prefix unless it would exceed
+    ``PC_NAME_MAX`` with the eight random characters appended.  The output
+    basename's byte length is checked against that limit where available;
+    an unavailable filesystem limit is ignored.  Errors become a ``ValueError``
+    naming ``out``: a missing directory, a directory in its place, no write
+    permission, or a name that is too long.
 
     Checked up front rather than by writing to a temporary file renamed over
     ``out`` at the end: :func:`run` writes each record as it comes, so that
@@ -2266,12 +2319,28 @@ def check_writable(out: str | os.PathLike[str]) -> None:
     """
     path = Path(out)
     try:
+        try:
+            mode = os.stat(path).st_mode
+        except FileNotFoundError:
+            mode = None
+        if mode is not None and (stat.S_ISFIFO(mode) or stat.S_ISCHR(mode) or stat.S_ISBLK(mode)):
+            if not os.access(path, os.W_OK, effective_ids=os.access in os.supports_effective_ids):
+                raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
         # A broken symlink counts as existing: opening it fails here, not at the first record.
-        if path.exists() or path.is_symlink():
+        elif mode is not None or path.is_symlink():
             with open(path, "a", encoding="utf-8"):
                 pass
         else:
-            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}."):
+            try:
+                name_max = os.pathconf(path.parent, "PC_NAME_MAX")
+            except (AttributeError, OSError, ValueError):
+                name_max = -1
+            if name_max > 0 and len(os.fsencode(path.name)) > name_max:
+                raise OSError(errno.ENAMETOOLONG, os.strerror(errno.ENAMETOOLONG), str(path))
+            prefix = f".{path.name}."
+            if name_max > 0 and len(os.fsencode(prefix)) + 8 > name_max:
+                prefix = ".out."
+            with tempfile.NamedTemporaryFile(dir=path.parent, prefix=prefix):
                 pass
     except OSError as error:
         reason = error.strerror or str(error)

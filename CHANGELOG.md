@@ -523,6 +523,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   dataset-selection, and training options (#563)
 
 ### Fixed
+- `examples/benchmark_rydberg_features.py` treats a feature cache entry it cannot read (empty, truncated, missing a field, or removed while being read) as a miss: it warns, recomputes the features and replaces the entry, instead of stopping the run (#621, #631)
 - Circuit diagnostics (`circuit_summary`, `draw_circuit`, `count_inert_parameters`) no
   longer fail on PennyLane 0.46 development builds, where `qml.transforms.decompose` stopped
   accepting a tape (#623)
@@ -616,6 +617,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--patience` ends in a command-line error), and a dataset name outside `DATASETS` raises a
   `ValueError` listing the allowed names instead of `tuple.index(x): x not in tuple`
   (#540, #605, #606)
+- `examples/benchmark_rydberg_features.py`: checking `--out` no longer opens FIFOs or
+  devices, and valid long output filenames are accepted without making the temporary
+  probe name too long (#628)
 
 ### Removed
 - `PCANormalizer`'s `copy` option, which never had an effect (#77)

@@ -28,15 +28,19 @@ What the numbers are checked against:
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import importlib.util
 import json
 import math
 import os
 import re
+import socket
 import sys
 import warnings
+from concurrent.futures import Future
 from pathlib import Path
+from threading import Thread
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
@@ -394,47 +398,116 @@ class TestGrid:
                 dict(n_atoms=11, arms=("A", "D")),
                 "n_atoms must be >= 1, <= 10 with arm A or B and <= 12 with arm D; got 11.",
             ),
+            (dict(max_epochs=math.nan), "max_epochs must be >= 1; got nan."),
+            (dict(batch_size=math.nan), "batch_size must be >= 1; got nan."),
+            (dict(patience=math.nan), "patience must be >= 1 or None; got nan."),
+            (dict(batch_size=2.5), "batch_size must be >= 1; got 2.5."),
+            (dict(batch_size=True), "batch_size must be >= 1; got True."),
             (dict(batch_size=0), "batch_size must be >= 1; got 0."),
             (dict(batch_size=-4, n_trials=0), "batch_size must be >= 1; got -4."),
+            (dict(batch_size=None), "batch_size must be >= 1; got None."),
+            (dict(batch_size="64"), "batch_size must be >= 1; got '64'."),
             (dict(lr=0.0), "lr must be finite and > 0; got 0.0."),
             (dict(lr=-0.01, n_trials=0), "lr must be finite and > 0; got -0.01."),
             (dict(lr=math.nan), "lr must be finite and > 0; got nan."),
             (dict(lr=math.inf), "lr must be finite and > 0; got inf."),
+            (dict(lr=True), "lr must be finite and > 0; got True."),
+            (dict(lr=None), "lr must be finite and > 0; got None."),
+            (dict(lr="0.01"), "lr must be finite and > 0; got '0.01'."),
+            (dict(max_epochs=None), "max_epochs must be >= 1; got None."),
+            (dict(max_epochs="64"), "max_epochs must be >= 1; got '64'."),
+            (dict(max_epochs=2.5), "max_epochs must be >= 1; got 2.5."),
+            (dict(max_epochs=True), "max_epochs must be >= 1; got True."),
+            (dict(patience=0), "patience must be >= 1 or None; got 0."),
+            (dict(patience=2.5), "patience must be >= 1 or None; got 2.5."),
+            (dict(patience=True), "patience must be >= 1 or None; got True."),
             (
                 dict(search_space={"batch_size": (32, 0)}),
-                "search_space['batch_size'] must hold values >= 1; got [32, 0].",
+                "search_space['batch_size'] values must be >= 1; got [32, 0].",
             ),
             (
-                dict(search_space={"lr": (0.01, 0.0), "batch_size": (32,)}),
-                "search_space['lr'] must hold finite values > 0; got [0.01, 0.0].",
+                dict(search_space={"batch_size": (None,)}),
+                "search_space['batch_size'] values must be >= 1; got [None].",
+            ),
+            (
+                dict(search_space={"batch_size": ("64",)}),
+                "search_space['batch_size'] values must be >= 1; got ['64'].",
+            ),
+            (
+                dict(search_space={"lr": (0.01, 0.0)}),
+                "search_space['lr'] values must be finite and > 0; got [0.01, 0.0].",
             ),
             (
                 dict(search_space={"lr": (-0.1,)}),
-                "search_space['lr'] must hold finite values > 0; got [-0.1].",
+                "search_space['lr'] values must be finite and > 0; got [-0.1].",
             ),
             (
                 dict(search_space={"lr": (0.01, math.inf)}),
-                "search_space['lr'] must hold finite values > 0; got [0.01, inf].",
+                "search_space['lr'] values must be finite and > 0; got [0.01, inf].",
+            ),
+            (
+                dict(search_space={"lr": (True,)}),
+                "search_space['lr'] values must be finite and > 0; got [True].",
+            ),
+            (
+                dict(search_space={"lr": (None,)}),
+                "search_space['lr'] values must be finite and > 0; got [None].",
+            ),
+            (
+                dict(search_space={"lr": ("0.01",)}),
+                "search_space['lr'] values must be finite and > 0; got ['0.01'].",
             ),
             (
                 dict(search_space={"max_epochs": (0,)}),
-                "search_space['max_epochs'] must hold values >= 1; got [0].",
+                "search_space['max_epochs'] values must be >= 1; got [0].",
+            ),
+            (
+                dict(search_space={"max_epochs": (None,)}),
+                "search_space['max_epochs'] values must be >= 1; got [None].",
+            ),
+            (
+                dict(search_space={"max_epochs": ("64",)}),
+                "search_space['max_epochs'] values must be >= 1; got ['64'].",
             ),
             (
                 dict(search_space={"max_epochs": (10, -1)}),
-                "search_space['max_epochs'] must hold values >= 1; got [10, -1].",
+                "search_space['max_epochs'] values must be >= 1; got [10, -1].",
             ),
             (
-                dict(search_space={"max_epochs": (None, 50)}),
-                "search_space['max_epochs'] must hold values >= 1; got [None, 50].",
+                dict(search_space={"max_epochs": (True,)}),
+                "search_space['max_epochs'] values must be >= 1; got [True].",
             ),
             (
                 dict(search_space={"patience": (0,)}),
-                "search_space['patience'] must hold values >= 1 or None; got [0].",
+                "search_space['patience'] values must be >= 1 or None; got [0].",
             ),
             (
                 dict(search_space={"patience": (5, -3, None)}),
-                "search_space['patience'] must hold values >= 1 or None; got [5, -3, None].",
+                "search_space['patience'] values must be >= 1 or None; got [5, -3, None].",
+            ),
+            (
+                dict(search_space={"max_epochs": (math.nan,)}),
+                "search_space['max_epochs'] values must be >= 1; got [nan].",
+            ),
+            (
+                dict(search_space={"max_epochs": (2.5,)}),
+                "search_space['max_epochs'] values must be >= 1; got [2.5].",
+            ),
+            (
+                dict(search_space={"batch_size": (math.nan,)}),
+                "search_space['batch_size'] values must be >= 1; got [nan].",
+            ),
+            (
+                dict(search_space={"batch_size": (2.5,)}),
+                "search_space['batch_size'] values must be >= 1; got [2.5].",
+            ),
+            (
+                dict(search_space={"patience": (math.nan,)}),
+                "search_space['patience'] values must be >= 1 or None; got [nan].",
+            ),
+            (
+                dict(search_space={"patience": (2.5,)}),
+                "search_space['patience'] values must be >= 1 or None; got [2.5].",
             ),
         ],
     )
@@ -462,6 +535,27 @@ class TestGrid:
         settings = bench.Settings(search_space=space)
         for key, expected in space.items():
             assert settings.search_space[key] == expected
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("max_epochs", np.int64(10)),
+            ("batch_size", np.int64(32)),
+            ("patience", np.int64(5)),
+            ("lr", np.float32(0.01)),
+        ],
+    )
+    @pytest.mark.parametrize("as_search_space", [False, True])
+    def test_numpy_numeric_training_settings_are_accepted(
+        self, key: str, value: Any, as_search_space: bool
+    ) -> None:
+        """NumPy integer and real scalars are valid training-setting values."""
+        if as_search_space:
+            settings = bench.Settings(search_space={key: (value,)})
+            assert settings.search_space[key] == (value,)
+        else:
+            settings = bench.Settings(**{key: value})
+            assert getattr(settings, key) == value
 
     def test_a_limit_binds_only_where_its_arm_runs(self) -> None:
         """``MAX_ATOMS`` is the Rydberg maps' limit and ``circuit_layers`` is arm D's depth."""
@@ -953,6 +1047,193 @@ class TestUciData:
 # ---------------------------------------------------------------------------
 # The command line: what a failing or noisy run leaves behind
 # ---------------------------------------------------------------------------
+
+
+class TestCheckWritable:
+    @pytest.mark.may_skip
+    @pytest.mark.skipif(os.name != "posix", reason="named pipes require POSIX")
+    def test_a_fifo_probe_returns_without_a_reader(self, tmp_path: Path) -> None:
+        """Exercise the real probe, with a deadline even if it starts opening the FIFO."""
+        out = tmp_path / "log"
+        os.mkfifo(out)
+        result: Future[None] = Future()
+
+        def check() -> None:
+            try:
+                bench.check_writable(out)
+            except BaseException as error:  # noqa: BLE001 - re-raise in the test thread
+                result.set_exception(error)
+            else:
+                result.set_result(None)
+
+        worker = Thread(target=check, daemon=True)
+        worker.start()
+        try:
+            result.result(timeout=2)
+        finally:
+            if not result.done():
+                # Release a writer blocked by a regression so it cannot leak into later tests.
+                reader = os.open(out, os.O_RDONLY | os.O_NONBLOCK)
+                try:
+                    worker.join(timeout=2)
+                finally:
+                    os.close(reader)
+            else:
+                worker.join(timeout=2)
+        assert not worker.is_alive()
+
+    @pytest.mark.may_skip
+    @pytest.mark.skipif(os.name != "posix", reason="named pipes require POSIX")
+    @pytest.mark.parametrize("symlink", [False, True])
+    @pytest.mark.parametrize("writable", [False, True])
+    @pytest.mark.parametrize("effective_ids", [False, True])
+    def test_a_fifo_is_checked_without_opening_it(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        symlink: bool,
+        writable: bool,
+        effective_ids: bool,
+    ) -> None:
+        """#625: opening a FIFO without a reader would hang instead of failing the test."""
+        fifo = tmp_path / "log"
+        os.mkfifo(fifo)
+        out = fifo
+        if symlink:
+            out = tmp_path / "link"
+            out.symlink_to(fifo)
+
+        def refuse_open(*args: Any, **kwargs: Any) -> None:
+            pytest.fail("the writability probe opened a FIFO")
+
+        access: list[tuple[Path, int, bool]] = []
+
+        def can_write(path: Path, mode: int, *, effective_ids: bool) -> bool:
+            access.append((path, mode, effective_ids))
+            return writable
+
+        monkeypatch.setattr(bench, "open", refuse_open, raising=False)
+        monkeypatch.setattr(bench.os, "access", can_write)
+        monkeypatch.setattr(
+            bench.os, "supports_effective_ids", {can_write} if effective_ids else set()
+        )
+        if writable:
+            bench.check_writable(out)
+        else:
+            message = f"out {str(out)!r} cannot be written: {os.strerror(errno.EACCES)}."
+            with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+                bench.check_writable(out)
+        assert access == [(out, os.W_OK, effective_ids)]
+
+    @pytest.mark.may_skip
+    @pytest.mark.skipif(os.name != "posix", reason="Unix sockets require POSIX")
+    def test_a_socket_is_refused_before_any_dataset_is_loaded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out = tmp_path / "socket"
+        loaded = TestCommandLine._spy_on_loading(monkeypatch)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener:
+            listener.bind(str(out))
+            out.chmod(0o666)
+            message = f"out {str(out)!r} cannot be written:"
+            with pytest.raises(ValueError, match=f"^{re.escape(message)}"):
+                bench.main(["--quick", "--out", str(out), "--no-cache"])
+        assert loaded == []
+
+    @pytest.mark.may_skip
+    @pytest.mark.skipif(os.name != "posix", reason="requires a POSIX null device")
+    def test_a_device_is_checked_without_opening_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def refuse_open(*args: Any, **kwargs: Any) -> None:
+            pytest.fail("the writability probe opened a device")
+
+        monkeypatch.setattr(bench, "open", refuse_open, raising=False)
+        bench.check_writable(os.devnull)
+
+    @pytest.mark.may_skip
+    def test_a_250_byte_filename_is_accepted(self, tmp_path: Path) -> None:
+        out = tmp_path / ("a" * 250)
+        # Verify that this filesystem supports the name before testing the probe.
+        try:
+            out.touch()
+        except OSError as error:
+            if error.errno == errno.ENAMETOOLONG:
+                pytest.skip("the filesystem does not support a 250-byte basename")
+            raise
+        out.unlink()
+        bench.check_writable(out)
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("name", ["a" * 15, "a" * 16, "a" * 17, "é" * 9])
+    def test_the_filename_limit_counts_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str
+    ) -> None:
+        calls: list[tuple[Path, str]] = []
+
+        def pathconf(path: Path, key: str) -> int:
+            calls.append((path, key))
+            return 16
+
+        monkeypatch.setattr(bench.os, "pathconf", pathconf, raising=False)
+        out = tmp_path / name
+        if len(os.fsencode(name)) <= 16:
+            bench.check_writable(out)
+        else:
+            message = f"out {str(out)!r} cannot be written: {os.strerror(errno.ENAMETOOLONG)}."
+            with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+                bench.check_writable(out)
+        assert calls == [(tmp_path, "PC_NAME_MAX")]
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        ("name", "prefix"),
+        [("log", ".log."), ("a" * 6, "." + "a" * 6 + "."), ("a" * 7, ".out."), ("é" * 4, ".out.")],
+    )
+    def test_the_probe_keeps_the_basename_when_it_fits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, prefix: str
+    ) -> None:
+        prefixes: list[str] = []
+        temporary_file = bench.tempfile.NamedTemporaryFile
+
+        def probe(*args: Any, **kwargs: Any) -> Any:
+            prefixes.append(kwargs["prefix"])
+            return temporary_file(*args, **kwargs)
+
+        monkeypatch.setattr(bench.os, "pathconf", lambda path, key: 16, raising=False)
+        monkeypatch.setattr(bench.tempfile, "NamedTemporaryFile", probe)
+        bench.check_writable(tmp_path / name)
+        assert prefixes == [prefix]
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize(
+        "limit", [None, OSError(errno.EIO, "unsupported"), ValueError(), -1, 0]
+    )
+    def test_an_unavailable_filename_limit_still_probes_the_directory(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: Exception | int | None
+    ) -> None:
+        prefixes: list[str] = []
+        temporary_file = bench.tempfile.NamedTemporaryFile
+
+        def probe(*args: Any, **kwargs: Any) -> Any:
+            prefixes.append(kwargs["prefix"])
+            return temporary_file(*args, **kwargs)
+
+        def pathconf(path: Path, key: str) -> int:
+            if isinstance(limit, Exception):
+                raise limit
+            assert isinstance(limit, int)
+            return limit
+
+        if limit is None:
+            monkeypatch.delattr(bench.os, "pathconf", raising=False)
+        else:
+            monkeypatch.setattr(bench.os, "pathconf", pathconf, raising=False)
+        monkeypatch.setattr(bench.tempfile, "NamedTemporaryFile", probe)
+        bench.check_writable(tmp_path / "new.jsonl")
+        assert prefixes == [".new.jsonl."]
+        assert list(tmp_path.iterdir()) == []
+        with pytest.raises(ValueError, match="cannot be written"):
+            bench.check_writable(tmp_path / "missing" / "new.jsonl")
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestCommandLine:
@@ -1535,6 +1816,108 @@ class TestCache:
         assert second.seconds == first.seconds > 0
         assert len(list((tmp_path / "cache").glob("*.npz"))) == 1
         assert not list((tmp_path / "cache").glob("*.part"))
+
+    @pytest.mark.parametrize(
+        "corruption",
+        [
+            "empty",
+            "invalid",
+            "missing_features",
+            "missing_environment",
+            "invalid_seconds",
+            "non_object_environment",
+        ],
+    )
+    def test_unreadable_cache_entries_are_recomputed(
+        self, tmp_path: Path, corruption: str
+    ) -> None:
+        compute, calls = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        cache = bench.FeatureCache(tmp_path)
+        first_path = cache.path(self.inputs, self.labels, config)
+        assert first_path is not None
+
+        # Create a valid entry, then damage it.
+        cache.fetch(self.inputs, self.labels, config, compute)
+        if corruption == "empty":
+            first_path.write_bytes(b"")
+        elif corruption == "invalid":
+            first_path.write_bytes(b"not a valid npz archive")
+        elif corruption == "missing_features":
+            np.savez(
+                first_path,
+                seconds=np.float64(1.0),
+                environment=np.array(json.dumps(cache.environment)),
+            )
+        elif corruption == "invalid_seconds":
+            np.savez(
+                first_path,
+                features=np.zeros((12, 4)),
+                seconds=np.array([1.0, 2.0]),
+                environment=np.array(json.dumps(cache.environment)),
+            )
+        elif corruption == "non_object_environment":
+            np.savez(
+                first_path,
+                features=np.zeros((12, 4)),
+                seconds=np.float64(1.0),
+                environment=np.array("[1]"),
+            )
+        else:
+            np.savez(
+                first_path,
+                features=np.zeros((12, 4)),
+                seconds=np.float64(1.0),
+            )
+
+        with pytest.warns(RuntimeWarning, match="unreadable"):
+            recovered = cache.fetch(self.inputs, self.labels, config, compute)
+
+        assert recovered.hit is False
+        assert calls == [12, 12]
+
+        np.testing.assert_array_equal(
+            recovered.features,
+            _map_by_hand(4, 1.0, 0.0, 1).transform(self.inputs),
+        )
+
+        again = cache.fetch(self.inputs, self.labels, config, compute)
+        assert again.hit is True
+        assert calls == [12, 12]
+        np.testing.assert_array_equal(again.features, recovered.features)
+
+    def test_cache_disappearing_during_load_is_recomputed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        compute, calls = self._counting()
+        config = {"config": _map_by_hand(4, 1.0, 0.0, 1).get_config()}
+        cache = bench.FeatureCache(tmp_path)
+        cache.fetch(self.inputs, self.labels, config, compute)
+
+        original_load = bench.np.load
+        disappeared = False
+
+        def load_with_disappearance(file: Any, *args: Any, **kwargs: Any) -> Any:
+            nonlocal disappeared
+            if not disappeared:
+                disappeared = True
+                raise FileNotFoundError("simulated cache removal during load")
+            return original_load(file, *args, **kwargs)
+
+        monkeypatch.setattr(bench.np, "load", load_with_disappearance)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            recovered = cache.fetch(self.inputs, self.labels, config, compute)
+
+        assert recovered.hit is False
+        assert calls == [12, 12]
+        monkeypatch.setattr(bench.np, "load", original_load)
+        assert cache.fetch(self.inputs, self.labels, config, compute).hit is True
+        assert calls == [12, 12]
+        np.testing.assert_array_equal(
+            recovered.features,
+            _map_by_hand(4, 1.0, 0.0, 1).transform(self.inputs),
+        )
 
     def test_a_change_of_the_data_is_a_miss(self, tmp_path: Path) -> None:
         compute, calls = self._counting()
