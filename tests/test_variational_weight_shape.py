@@ -60,3 +60,16 @@ def test_dim_zero_is_the_layer_index() -> None:
 def test_unknown_entangler() -> None:
     with pytest.raises(ValueError, match="entangler must be"):
         variational_weight_shape("ladder", 3, 2)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("entangler", "expected_shape"),
+    [
+        ("ring", (2, 3, 3)),
+        ("strongly_entangling", (2, 3, 3)),
+        ("brickwork", (2, 3, 3)),
+        ("hardware_efficient", (2, 3)),
+    ],
+)
+def test_shapes_for_each_entangler(entangler: Entangler, expected_shape: tuple[int, ...]) -> None:
+    assert variational_weight_shape(entangler, 3, 2) == expected_shape

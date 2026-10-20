@@ -211,8 +211,9 @@ other places to update:
 2. Add a value to the `Entangler` literal and a branch for it in `apply_variational_layers` that
    calls the primitive once per layer. mypy flags a value the dispatch doesn't handle, through
    the `typing.assert_never` at its end.
-3. Add a branch to `variational_weight_shape` if its weights aren't `(n_layers, n_qubits, 3)`.
-   Nothing checks this now: an unhandled value silently gets that default shape.
+3. Add a branch to `variational_weight_shape` for its weight shape (e.g. `(n_layers, n_qubits, 3)`
+   for `Rot` blocks or `(n_layers, n_qubits)` for single-angle blocks). mypy flags a missing
+   shape branch too, through the `typing.assert_never` at its end.
 
 ### Interface and conventions
 
@@ -253,8 +254,8 @@ other places to update:
 ### Also update
 
 - The `Entangler` `Literal` and a branch in `apply_variational_layers` (with its docstring
-  entry), both in `_common.py`, and a branch in `variational_weight_shape` if the
-  block's shape differs. `validate_circuit_options` and its error message read
+  entry), both in `_common.py`, and a branch in `variational_weight_shape` (mypy flags
+  a missing branch there too). `validate_circuit_options` and its error message read
   the choices from the `Literal`, so they need no change.
 - The `entangler` parameter docstrings: the angle, IQP and re-uploading builders and layers, and
   `hqnn_forge/models/` (`HybridBinaryClassifier`, `ParallelHybridClassifier`).
