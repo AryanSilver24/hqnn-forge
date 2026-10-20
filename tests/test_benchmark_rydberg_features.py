@@ -398,47 +398,116 @@ class TestGrid:
                 dict(n_atoms=11, arms=("A", "D")),
                 "n_atoms must be >= 1, <= 10 with arm A or B and <= 12 with arm D; got 11.",
             ),
+            (dict(max_epochs=math.nan), "max_epochs must be >= 1; got nan."),
+            (dict(batch_size=math.nan), "batch_size must be >= 1; got nan."),
+            (dict(patience=math.nan), "patience must be >= 1 or None; got nan."),
+            (dict(batch_size=2.5), "batch_size must be >= 1; got 2.5."),
+            (dict(batch_size=True), "batch_size must be >= 1; got True."),
             (dict(batch_size=0), "batch_size must be >= 1; got 0."),
             (dict(batch_size=-4, n_trials=0), "batch_size must be >= 1; got -4."),
+            (dict(batch_size=None), "batch_size must be >= 1; got None."),
+            (dict(batch_size="64"), "batch_size must be >= 1; got '64'."),
             (dict(lr=0.0), "lr must be finite and > 0; got 0.0."),
             (dict(lr=-0.01, n_trials=0), "lr must be finite and > 0; got -0.01."),
             (dict(lr=math.nan), "lr must be finite and > 0; got nan."),
             (dict(lr=math.inf), "lr must be finite and > 0; got inf."),
+            (dict(lr=True), "lr must be finite and > 0; got True."),
+            (dict(lr=None), "lr must be finite and > 0; got None."),
+            (dict(lr="0.01"), "lr must be finite and > 0; got '0.01'."),
+            (dict(max_epochs=None), "max_epochs must be >= 1; got None."),
+            (dict(max_epochs="64"), "max_epochs must be >= 1; got '64'."),
+            (dict(max_epochs=2.5), "max_epochs must be >= 1; got 2.5."),
+            (dict(max_epochs=True), "max_epochs must be >= 1; got True."),
+            (dict(patience=0), "patience must be >= 1 or None; got 0."),
+            (dict(patience=2.5), "patience must be >= 1 or None; got 2.5."),
+            (dict(patience=True), "patience must be >= 1 or None; got True."),
             (
                 dict(search_space={"batch_size": (32, 0)}),
-                "search_space['batch_size'] must hold values >= 1; got [32, 0].",
+                "search_space['batch_size'] values must be >= 1; got [32, 0].",
             ),
             (
-                dict(search_space={"lr": (0.01, 0.0), "batch_size": (32,)}),
-                "search_space['lr'] must hold finite values > 0; got [0.01, 0.0].",
+                dict(search_space={"batch_size": (None,)}),
+                "search_space['batch_size'] values must be >= 1; got [None].",
+            ),
+            (
+                dict(search_space={"batch_size": ("64",)}),
+                "search_space['batch_size'] values must be >= 1; got ['64'].",
+            ),
+            (
+                dict(search_space={"lr": (0.01, 0.0)}),
+                "search_space['lr'] values must be finite and > 0; got [0.01, 0.0].",
             ),
             (
                 dict(search_space={"lr": (-0.1,)}),
-                "search_space['lr'] must hold finite values > 0; got [-0.1].",
+                "search_space['lr'] values must be finite and > 0; got [-0.1].",
             ),
             (
                 dict(search_space={"lr": (0.01, math.inf)}),
-                "search_space['lr'] must hold finite values > 0; got [0.01, inf].",
+                "search_space['lr'] values must be finite and > 0; got [0.01, inf].",
+            ),
+            (
+                dict(search_space={"lr": (True,)}),
+                "search_space['lr'] values must be finite and > 0; got [True].",
+            ),
+            (
+                dict(search_space={"lr": (None,)}),
+                "search_space['lr'] values must be finite and > 0; got [None].",
+            ),
+            (
+                dict(search_space={"lr": ("0.01",)}),
+                "search_space['lr'] values must be finite and > 0; got ['0.01'].",
             ),
             (
                 dict(search_space={"max_epochs": (0,)}),
-                "search_space['max_epochs'] must hold values >= 1; got [0].",
+                "search_space['max_epochs'] values must be >= 1; got [0].",
+            ),
+            (
+                dict(search_space={"max_epochs": (None,)}),
+                "search_space['max_epochs'] values must be >= 1; got [None].",
+            ),
+            (
+                dict(search_space={"max_epochs": ("64",)}),
+                "search_space['max_epochs'] values must be >= 1; got ['64'].",
             ),
             (
                 dict(search_space={"max_epochs": (10, -1)}),
-                "search_space['max_epochs'] must hold values >= 1; got [10, -1].",
+                "search_space['max_epochs'] values must be >= 1; got [10, -1].",
             ),
             (
-                dict(search_space={"max_epochs": (None, 50)}),
-                "search_space['max_epochs'] must hold values >= 1; got [None, 50].",
+                dict(search_space={"max_epochs": (True,)}),
+                "search_space['max_epochs'] values must be >= 1; got [True].",
             ),
             (
                 dict(search_space={"patience": (0,)}),
-                "search_space['patience'] must hold values >= 1 or None; got [0].",
+                "search_space['patience'] values must be >= 1 or None; got [0].",
             ),
             (
                 dict(search_space={"patience": (5, -3, None)}),
-                "search_space['patience'] must hold values >= 1 or None; got [5, -3, None].",
+                "search_space['patience'] values must be >= 1 or None; got [5, -3, None].",
+            ),
+            (
+                dict(search_space={"max_epochs": (math.nan,)}),
+                "search_space['max_epochs'] values must be >= 1; got [nan].",
+            ),
+            (
+                dict(search_space={"max_epochs": (2.5,)}),
+                "search_space['max_epochs'] values must be >= 1; got [2.5].",
+            ),
+            (
+                dict(search_space={"batch_size": (math.nan,)}),
+                "search_space['batch_size'] values must be >= 1; got [nan].",
+            ),
+            (
+                dict(search_space={"batch_size": (2.5,)}),
+                "search_space['batch_size'] values must be >= 1; got [2.5].",
+            ),
+            (
+                dict(search_space={"patience": (math.nan,)}),
+                "search_space['patience'] values must be >= 1 or None; got [nan].",
+            ),
+            (
+                dict(search_space={"patience": (2.5,)}),
+                "search_space['patience'] values must be >= 1 or None; got [2.5].",
             ),
         ],
     )
@@ -466,6 +535,27 @@ class TestGrid:
         settings = bench.Settings(search_space=space)
         for key, expected in space.items():
             assert settings.search_space[key] == expected
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            ("max_epochs", np.int64(10)),
+            ("batch_size", np.int64(32)),
+            ("patience", np.int64(5)),
+            ("lr", np.float32(0.01)),
+        ],
+    )
+    @pytest.mark.parametrize("as_search_space", [False, True])
+    def test_numpy_numeric_training_settings_are_accepted(
+        self, key: str, value: Any, as_search_space: bool
+    ) -> None:
+        """NumPy integer and real scalars are valid training-setting values."""
+        if as_search_space:
+            settings = bench.Settings(search_space={key: (value,)})
+            assert settings.search_space[key] == (value,)
+        else:
+            settings = bench.Settings(**{key: value})
+            assert getattr(settings, key) == value
 
     def test_a_limit_binds_only_where_its_arm_runs(self) -> None:
         """``MAX_ATOMS`` is the Rydberg maps' limit and ``circuit_layers`` is arm D's depth."""
